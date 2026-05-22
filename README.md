@@ -9,12 +9,15 @@ More information: <https://thrunter.org/urlscanCLI>
 - **Domain search** — find previous scans of a domain, with WHOIS registration data and TLS certificate info
 - **IP / CIDR search** — find scans observed at a specific IP address or subnet
 - **Hostname API** — query the urlscan Hostname API for aggregated observation history (Passive DNS, Certificate Transparency, scan links, etc.)
+- **Freeform search** — run arbitrary queries against the urlscan search index using Elasticsearch query syntax
+- **Brand tracking** — list tracked phishing brands and view detection statistics per brand
 - **Scan report** — fetch and display a full scan result by UUID or result URL
 - **Submit for scanning** — submit a URL to urlscan.io and get the result UUID back (private by default)
 - **API quota status** — check current rate-limit usage and remaining quota for your API key
 - **SHA256 hash lookup** — find scans where a file with a given SHA256 hash was observed
 - **Defanged input** — accepts defanged formats such as `example[.]com`, `hxxps://evil[.]com`, `1[.]2[.]3[.]4`, `2001[:]db8::1`
 - **JSON output** — machine-readable output via `--json`
+- **CSV output** — tabular export via `--csv` for spreadsheet and pipeline workflows
 - **macOS Keychain** — store your API key securely, no plaintext config files
 - **Debug mode** — inspect every API call with `--debug`
 
@@ -47,10 +50,10 @@ You can always override the stored key for a single run with `--api-key KEY`.
 ## Usage
 
 ```
-python3 urlscanCLI.py [domain] [--ip ADDR] [--hostname HOST] [options]
+python3 urlscanCLI.py [domain] [--ip ADDR] [--hostname HOST] [--search QUERY] [options]
 ```
 
-Exactly one of `domain`, `--ip`, or `--hostname` must be provided.
+Exactly one of `domain`, `--ip`, `--hostname`, `--scan`, `--urlscan`, `--hash`, or `--search` must be provided.
 
 ### Options
 
@@ -62,11 +65,15 @@ Exactly one of `domain`, `--ip`, or `--hostname` must be provided.
 | `--scan SCANID` | Fetch a specific scan result by UUID or full result URL |
 | `--urlscan URL` | Submit a URL for scanning (requires API key; default: private) |
 | `--hash SHA256` | Search for scans containing a file with this SHA256 hash |
+| `--search QUERY` | Run a freeform search query (Elasticsearch query syntax) |
+| `--brands` | List all brands tracked by urlscan.io's phishing detection |
+| `--brand KEY` | Show phishing tracking details for a specific brand key |
 | `--public` | Submit with public visibility (use with `--urlscan`) |
 | `--unlisted` | Submit with unlisted visibility (use with `--urlscan`) |
 | `--wait` | After submitting, wait for the scan to finish and display the full report (use with `--urlscan`) |
 | `--json` | Output results as JSON |
-| `--size N` | Number of results to return (default: 10, max: 100) |
+| `--csv` | Output scan results as CSV (mutually exclusive with `--json`) |
+| `--size N` | Number of results to return (default: 10, max: 10000) |
 | `--api-key KEY` | API key to use for this run (overrides keychain) |
 | `--save-key KEY` | Save API key to macOS Keychain and exit |
 | `--delete-key` | Remove saved API key from macOS Keychain and exit |
@@ -341,7 +348,7 @@ When used with `--logdir`, the final report is saved as a `SCAN_<UUID>` file (sa
 
 ### JSON output
 
-All modes support `--json`. The top-level `query_type` field identifies the mode (`domain`, `ip`, `cidr`, or `hostname`).
+All modes support `--json`. The top-level `query_type` field identifies the mode (`domain`, `ip`, `cidr`, `hostname`, or `search`).
 
 **Domain:**
 ```json
@@ -447,6 +454,210 @@ The hash must be exactly 64 hexadecimal characters. WHOIS and certificate enrich
 }
 ```
 
+### Freeform search
+
+Run any query against the urlscan.io search API using Elasticsearch query syntax. This gives full access to all searchable fields and supports boolean operators, wildcards, and date ranges.
+
+```
+python3 urlscanCLI.py --search 'page.domain:example.com AND page.country:US'
+python3 urlscanCLI.py --search 'task.tags:phishing'
+python3 urlscanCLI.py --search 'page.server:nginx AND date:>2024-01-01' --size 50
+python3 urlscanCLI.py --search 'page.asn:AS13335' --json
+python3 urlscanCLI.py --search 'page.domain:example.com' --csv
+python3 urlscanCLI.py --search 'filename:malware.exe OR page.title:*login*' --csv --logdir ./logs
+```
+
+Common search fields include:
+
+| Field | Description |
+|---|---|
+| `page.domain` | Domain of the scanned page |
+| `page.ip` | IP address the page resolved to |
+| `page.url` | Full URL that was scanned |
+| `page.server` | Server header value |
+| `page.title` | Page title |
+| `page.country` | Country code (two-letter, e.g. `US`, `DE`) |
+| `page.asn` | ASN (e.g. `AS13335`) |
+| `task.tags` | Tags applied to the scan |
+| `date` | Scan date (supports ranges: `>2024-01-01`, `[2024-01-01 TO 2024-06-01]`) |
+| `filename` | Name of a file observed in the scan |
+| `files.sha256` | SHA256 hash of a file observed in the scan |
+
+Combine with `AND`, `OR`, `NOT`, parentheses, and wildcards (`*`). For the full list of queryable fields, see the urlscan.io search documentation.
+
+**Sample output:**
+
+```
+================================================================
+  urlscan.io — page.domain:example.com AND page.server:cloudflare
+================================================================
+  Total scans indexed: 10000   Showing: 3
+
+----------------------------------------------------------------
+  Scan History
+----------------------------------------------------------------
+  [1] 2026-05-19 02:01:27 UTC
+      URL:     https://example.com/
+      IP:      104.20.23.154  AS13335 CLOUDFLARENET - Cloudflare, Inc., US
+      Server:  cloudflare
+      Title:   Example Domain
+      Report:  https://urlscan.io/result/019e3df7-5880-77bd-82d2-7f0fc4fb7fcf/
+
+================================================================
+```
+
+**JSON output** (`--json`) includes `query_type: "search"`:
+
+```json
+{
+  "query_type": "search",
+  "query": "page.domain:example.com AND page.server:cloudflare",
+  "total": 10000,
+  "scans": [
+    {
+      "scan_time": "2026-05-19T02:01:27.185Z",
+      "url": "https://example.com/",
+      "uuid": "019e3df7-5880-77bd-82d2-7f0fc4fb7fcf",
+      "ip": "104.20.23.154",
+      "country": "",
+      "asn": "AS13335",
+      "asnname": "CLOUDFLARENET - Cloudflare, Inc., US",
+      "server": "cloudflare",
+      "title": "Example Domain",
+      "malicious": false,
+      "score": 0,
+      "report_url": "https://urlscan.io/result/019e3df7-5880-77bd-82d2-7f0fc4fb7fcf/"
+    }
+  ]
+}
+```
+
+### CSV output
+
+All search-based modes (domain, IP, hash, and freeform search) support `--csv` as an alternative to `--json`. CSV output produces a header row followed by one row per scan result, making it ideal for spreadsheet import, `csvkit` pipelines, or quick filtering with `cut`/`awk`.
+
+```
+python3 urlscanCLI.py example.com --csv
+python3 urlscanCLI.py --ip 1.2.3.4 --csv
+python3 urlscanCLI.py --search 'task.tags:phishing' --csv --size 100
+python3 urlscanCLI.py --search 'page.domain:example.com' --csv --logdir ./logs
+```
+
+`--csv` and `--json` are mutually exclusive.
+
+**Columns:** `scan_time`, `url`, `domain`, `ip`, `country`, `asn`, `asnname`, `server`, `title`, `malicious`, `score`, `report_url`
+
+**Sample output:**
+
+```
+scan_time,url,domain,ip,country,asn,asnname,server,title,malicious,score,report_url
+2026-05-19T02:01:27.185Z,https://example.com/,example.com,104.20.23.154,,AS13335,"CLOUDFLARENET - Cloudflare, Inc., US",cloudflare,Example Domain,False,0,https://urlscan.io/result/019e3df7-5880-77bd-82d2-7f0fc4fb7fcf/
+2026-05-19T02:01:24.499Z,https://example.com/,example.com,2606:4700:10::6814:179a,,AS13335,"CLOUDFLARENET - Cloudflare, Inc., US",cloudflare,Example Domain,False,0,https://urlscan.io/result/019e3df7-4d6d-727f-a78a-dd505dbf1ac0/
+```
+
+When used with `--logdir`, the log file is saved with a `.csv` extension.
+
+### Brand tracking
+
+urlscan.io tracks phishing pages targeting well-known brands. The brand API requires a Pro API key.
+
+#### Listing available brands
+
+Use `--brands` to see all brands tracked by urlscan's phishing detection engine:
+
+```
+python3 urlscanCLI.py --brands
+python3 urlscanCLI.py --brands --json
+python3 urlscanCLI.py --brands --csv
+```
+
+**Sample output:**
+
+```
+================================================================
+  urlscan.io — Tracked Brands
+================================================================
+  Total brands: 2491
+
+----------------------------------------------------------------
+  Brand                          Vertical             Country
+----------------------------------------------------------------
+  Generic                        Online               UN
+  Smartsheets                    Online               US
+  ESTA                           Government           US
+  Canadian Government            Government           CA
+  UK Government                  Government           GB
+  Microsoft                      Consumer             US
+  Google                         Online               US
+  ...
+
+================================================================
+```
+
+**CSV output** includes full detail: `key`, `name`, `vertical`, `country`, `region`, `keywords`, `domains`, `asns`.
+
+#### Brand phishing detail
+
+Use `--brand KEY` to view phishing detection statistics for a specific brand. The key is the brand identifier shown in `--brands --csv` output (e.g. `microsoft`, `google`, `paypal`):
+
+```
+python3 urlscanCLI.py --brand microsoft
+python3 urlscanCLI.py --brand google --json
+python3 urlscanCLI.py --brand paypal --csv
+```
+
+**Sample output:**
+
+```
+================================================================
+  urlscan.io — Brand: Microsoft
+================================================================
+  Key:        microsoft
+  Vertical:   Consumer
+  Country:    US
+  Keywords:   microsoft
+  Domains:    accesscontrol.windows.net, account.live.com, azure.com, ...
+              (+41 more)
+  ASNs:       AS16839
+
+----------------------------------------------------------------
+  Phishing Detections
+----------------------------------------------------------------
+  Total detected: 1,208,210
+
+----------------------------------------------------------------
+  Most Recent Detection
+----------------------------------------------------------------
+  Time:       2026-05-19 02:28:01 UTC
+  Report:     https://urlscan.io/result/019e3e0f-a44f-713d-bfca-cfc4148ef2ae/
+
+================================================================
+```
+
+**JSON output** (`--json`) includes `query_type: "brand"` with full brand metadata, total detection count, and the most recent phishing scan:
+
+```json
+{
+  "query_type": "brand",
+  "query": "microsoft",
+  "brand": {
+    "name": "Microsoft",
+    "key": "microsoft",
+    "vertical": ["Consumer"],
+    "country": ["us"],
+    "terms": { "domains": ["azure.com", "live.com", "..."], "asns": ["AS16839"] }
+  },
+  "total": 1208210,
+  "scans": [
+    {
+      "scan_time": "2026-05-19T02:28:01.261Z",
+      "uuid": "019e3e0f-a44f-713d-bfca-cfc4148ef2ae",
+      "report_url": "https://urlscan.io/result/019e3e0f-a44f-713d-bfca-cfc4148ef2ae/"
+    }
+  ]
+}
+```
+
 ### API quota status
 
 Check current rate-limit usage for your API key with `--status`. An API key is required (from the keychain or `--api-key`). This option does not require a domain, IP, or any other target argument.
@@ -527,6 +738,9 @@ python3 urlscanCLI.py example.com --debug --json 2>/dev/null | jq .
 |---|---|
 | Domain search | `GET /api/v1/search/?q=page.domain:{domain}` |
 | IP / CIDR search | `GET /api/v1/search/?q=page.ip:{ip}` (CIDR uses ES range syntax) |
+| Freeform search (`--search`) | `GET /api/v1/search/?q={query}` |
+| Available brands (`--brands`) | `GET /api/v1/pro/availableBrands` |
+| Brand detail (`--brand`) | `GET /api/v1/pro/brands` |
 | Scan detail (WHOIS, certs) | `GET /api/v1/result/{uuid}/` |
 | Hostname | `GET /api/v1/hostname/{hostname}/` |
 | Scan report (`--scan`) | `GET /api/v1/result/{uuid}/` |
@@ -544,12 +758,15 @@ URLSCAN_<YYYYmmDD_HHMMSS>_<OPERATION>_<query>.<ext>
 
 | Mode | OPERATION | query | ext |
 |---|---|---|---|
-| Domain search | `RESULTS` | domain name (dots → `_`) | `.txt` / `.json` |
-| IP / CIDR search | `IP` | address (dots, `/` → `_`) | `.txt` / `.json` |
+| Domain search | `RESULTS` | domain name (dots → `_`) | `.txt` / `.json` / `.csv` |
+| IP / CIDR search | `IP` | address (dots, `/` → `_`) | `.txt` / `.json` / `.csv` |
 | Hostname API | `HOST` | hostname (dots → `_`) | `.txt` / `.json` |
 | Scan report | `SCAN` | UUID (hyphens preserved) | `.txt` / `.json` |
 | URL submission | `URLSCAN` | hostname from submitted URL | `.txt` / `.json` |
-| SHA256 hash lookup | `HASH` | full SHA256 hex string | `.txt` / `.json` |
+| SHA256 hash lookup | `HASH` | full SHA256 hex string | `.txt` / `.json` / `.csv` |
+| Freeform search | `SEARCH` | query string (special chars → `_`) | `.txt` / `.json` / `.csv` |
+| Brand list | `BRANDS` | *(none)* | `.txt` / `.json` / `.csv` |
+| Brand detail | `BRAND` | brand key | `.txt` / `.json` / `.csv` |
 | Quota status | `STATUS` | *(none)* | `.txt` / `.json` |
 
 Examples:
@@ -560,7 +777,10 @@ URLSCAN_20260314_120641_IP_49_12_22_0_24.json
 URLSCAN_20260314_120642_HOST_www_evil_com.txt
 URLSCAN_20260314_120643_SCAN_019cec3d-b942-7124-9337-15b39874e417.txt
 URLSCAN_20260314_120644_HASH_6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b.txt
-URLSCAN_20260314_120645_STATUS.txt
+URLSCAN_20260314_120645_SEARCH_page_domain_example_com.csv
+URLSCAN_20260314_120646_BRANDS.csv
+URLSCAN_20260314_120647_BRAND_microsoft.txt
+URLSCAN_20260314_120648_STATUS.txt
 ```
 
 The log notification is written to stderr so it does not contaminate stdout pipelines. If the directory does not exist the tool exits with an error before making any API calls.
@@ -568,6 +788,6 @@ The log notification is written to stderr so it does not contaminate stdout pipe
 ## Notes
 
 - The urlscan.io API rate-limits unauthenticated requests. An API key is strongly recommended for regular use.
-- The `--size` limit applies to the search modes (domain and IP). The Hostname API always returns its full result set (up to 1000 records).
+- The `--size` limit applies to the search modes (domain, IP, hash, and freeform search). The Hostname API always returns its full result set (up to 1000 records).
 - WHOIS and certificate data are sourced from the most recent scan result and reflect what urlscan observed at that point in time.
 - IPv6 addresses and CIDR ranges are automatically translated to Elasticsearch range query syntax, which the urlscan search API requires.

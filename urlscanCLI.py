@@ -8,6 +8,7 @@ More information: https://thrunter.org/urlscanCLI
 """
 
 import argparse
+import csv
 import io
 import json
 import os
@@ -52,13 +53,16 @@ def _safe_filename_part(value: str) -> str:
     return safe.strip('_')
 
 
-def _emit(content: str, logdir: Optional[str], operation: str, query: str, use_json: bool) -> None:
-    """Write content to stdout and, if logdir is set, also save it to a timestamped log file."""
+def _emit(content: str, logdir: Optional[str], operation: str, query: str, fmt: str = "txt") -> None:
+    """Write content to stdout and, if logdir is set, also save it to a timestamped log file.
+
+    fmt should be "txt", "json", or "csv".
+    """
     sys.stdout.write(content)
     if not logdir:
         return
     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    ext = 'json' if use_json else 'txt'
+    ext = fmt
     query_part = _safe_filename_part(query)
     filename = f"URLSCAN_{ts}_{operation}_{query_part}.{ext}" if query_part else f"URLSCAN_{ts}_{operation}.{ext}"
     path = os.path.join(logdir, filename)
@@ -309,6 +313,24 @@ def get_quota(api_key: str) -> dict:
     return _get(url, api_key)
 
 
+def get_available_brands(api_key: str) -> dict:
+    """Call the urlscan available brands API and return the raw response."""
+    url = f"{URLSCAN_BASE}/pro/availableBrands"
+    dbg(f"Available Brands API: {url}")
+    return _get(url, api_key)
+
+
+def get_brands_summary(api_key: str) -> dict:
+    """Call the urlscan brands summary API and return the raw response.
+
+    This endpoint is slower — it returns total detections and the most recent
+    phishing hit for every tracked brand.
+    """
+    url = f"{URLSCAN_BASE}/pro/brands"
+    dbg(f"Brands Summary API: {url}")
+    return _get(url, api_key)
+
+
 def search_ip(ip_or_cidr: str, api_key: Optional[str], size: int = 10) -> dict:
     import ipaddress
     net = ipaddress.ip_network(ip_or_cidr, strict=False)
@@ -407,6 +429,110 @@ def print_quota_text(data: dict) -> None:
         if max_retention is not None:
             print(f"  Retention:    {max_retention} days")
         print()
+
+    print(SEP)
+
+
+# ---------------------------------------------------------------------------
+# Brand display
+# ---------------------------------------------------------------------------
+
+def print_brands_text(kits: list) -> None:
+    """Print the available brands list in human-readable form."""
+    SEP  = "=" * 64
+    DASH = "-" * 64
+
+    print(SEP)
+    print("  urlscan.io — Tracked Brands")
+    print(SEP)
+    print(f"  Total brands: {len(kits)}")
+    print()
+    print(DASH)
+    print(f"  {'Brand':<30} {'Vertical':<20} {'Country'}")
+    print(DASH)
+    for kit in kits:
+        name     = kit.get("name", "")
+        vertical = ", ".join(kit.get("vertical", []))
+        country  = ", ".join(c.upper() for c in kit.get("country", []))
+        print(f"  {name:<30} {vertical:<20} {country}")
+    print()
+    print(SEP)
+
+
+def _format_brands_csv(kits: list) -> str:
+    """Format available brands as CSV."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["key", "name", "vertical", "country", "region", "keywords", "domains", "asns"])
+    for kit in kits:
+        writer.writerow([
+            kit.get("key", ""),
+            kit.get("name", ""),
+            "; ".join(kit.get("vertical", [])),
+            "; ".join(kit.get("country", [])),
+            "; ".join(kit.get("region", [])),
+            "; ".join(kit.get("keywords", [])),
+            "; ".join(kit.get("terms", {}).get("domains", [])),
+            "; ".join(kit.get("terms", {}).get("asns", [])),
+        ])
+    return buf.getvalue()
+
+
+def print_brand_detail_text(brand_info: dict, hits: list, total: int) -> None:
+    """Print brand phishing tracking detail in human-readable form."""
+    SEP  = "=" * 64
+    DASH = "-" * 64
+
+    name     = brand_info.get("name", "")
+    key      = brand_info.get("key", "")
+    vertical = ", ".join(brand_info.get("vertical", []))
+    country  = ", ".join(c.upper() for c in brand_info.get("country", []))
+    domains  = brand_info.get("terms", {}).get("domains", [])
+    asns     = brand_info.get("terms", {}).get("asns", [])
+    keywords = brand_info.get("keywords", [])
+
+    print(SEP)
+    print(f"  urlscan.io — Brand: {name}")
+    print(SEP)
+    print(f"  Key:        {key}")
+    print(f"  Vertical:   {vertical}")
+    print(f"  Country:    {country}")
+    if keywords:
+        print(f"  Keywords:   {', '.join(keywords)}")
+    if domains:
+        print(f"  Domains:    {', '.join(domains[:10])}")
+        if len(domains) > 10:
+            print(f"              (+{len(domains) - 10} more)")
+    if asns:
+        print(f"  ASNs:       {', '.join(asns)}")
+    print()
+
+    print(DASH)
+    print(f"  Phishing Detections")
+    print(DASH)
+    print(f"  Total detected: {total:,}")
+    print()
+
+    if hits:
+        print(DASH)
+        print("  Most Recent Detection")
+        print(DASH)
+        for hit in hits:
+            task = hit.get("task", {})
+            uuid = hit.get("_id", task.get("uuid", ""))
+            scan_time = _fmt_date(task.get("time", ""))
+            # Brand summary hits have minimal fields; show what's available
+            url   = task.get("url", hit.get("page", {}).get("url", ""))
+            title = hit.get("page", {}).get("title", "")
+
+            print(f"  Time:       {scan_time}")
+            if url:
+                print(f"  URL:        {url}")
+            if title:
+                print(f"  Title:      {title[:80]}")
+            if uuid:
+                print(f"  Report:     https://urlscan.io/result/{uuid}/")
+            print()
 
     print(SEP)
 
@@ -958,6 +1084,34 @@ def _build_scan_list(hits: list) -> list:
     ]
 
 
+def _format_csv(hits: list) -> str:
+    """Format scan results as CSV."""
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["scan_time", "url", "domain", "ip", "country", "asn",
+                     "asnname", "server", "title", "malicious", "score", "report_url"])
+    for hit in hits:
+        task = hit.get("task", {})
+        page = hit.get("page", {})
+        verdicts = hit.get("verdicts", {})
+        uuid = hit.get("_id", task.get("uuid", ""))
+        writer.writerow([
+            task.get("time", ""),
+            task.get("url", page.get("url", "")),
+            page.get("domain", ""),
+            page.get("ip", ""),
+            page.get("country", ""),
+            page.get("asn", ""),
+            page.get("asnname", ""),
+            page.get("server", ""),
+            page.get("title", ""),
+            verdicts.get("overall", {}).get("malicious", False),
+            verdicts.get("overall", {}).get("score", 0),
+            f"https://urlscan.io/result/{uuid}/" if uuid else "",
+        ])
+    return buf.getvalue()
+
+
 def main():
     global _debug, _useragent
 
@@ -986,6 +1140,14 @@ Examples:
   %(prog)s --urlscan https://example.com --wait --json
   %(prog)s --hash 6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b
   %(prog)s --hash 6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b --json
+  %(prog)s --search 'page.domain:example.com AND page.country:US'
+  %(prog)s --search 'task.tags:phishing' --csv
+  %(prog)s --search 'page.server:nginx AND date:>2024-01-01' --json --size 50
+  %(prog)s example.com --csv
+  %(prog)s --brands
+  %(prog)s --brands --csv
+  %(prog)s --brand microsoft
+  %(prog)s --brand google --json --size 25
 
 Keychain management (macOS):
   %(prog)s --save-key YOUR_KEY   Save API key to keychain
@@ -1006,6 +1168,14 @@ More information: https://thrunter.org/urlscanCLI
                         help="Submit a URL for scanning (default visibility: private)")
     parser.add_argument("--hash",      metavar="SHA256",
                         help="Search for scans containing a file with this SHA256 hash")
+    parser.add_argument("--search",    metavar="QUERY",
+                        help="Run a raw search query against the urlscan.io search API "
+                             "(Elasticsearch query syntax, e.g. 'page.domain:example.com AND page.country:US')")
+    parser.add_argument("--brands",    action="store_true",
+                        help="List all brands tracked by urlscan.io's phishing detection (requires API key)")
+    parser.add_argument("--brand",     metavar="KEY",
+                        help="Show phishing tracking details and recent detections for a specific brand key "
+                             "(use --brands to discover available keys)")
     vis_group = parser.add_mutually_exclusive_group()
     vis_group.add_argument("--public",   action="store_true",
                            help="Submit scan with public visibility (use with --urlscan)")
@@ -1014,9 +1184,12 @@ More information: https://thrunter.org/urlscanCLI
     parser.add_argument("--wait",      action="store_true",
                         help="After submitting with --urlscan, wait for the scan to complete "
                              "and display the full report (initial wait: 30s, retry every 15s)")
-    parser.add_argument("--json",     action="store_true", help="Output as JSON")
+    fmt_group = parser.add_mutually_exclusive_group()
+    fmt_group.add_argument("--json",  action="store_true", help="Output as JSON")
+    fmt_group.add_argument("--csv",   action="store_true",
+                           help="Output scan results as CSV (header row + data rows)")
     parser.add_argument("--size",     type=int, default=10, metavar="N",
-                        help="Max results to return (default: 10, max: 100)")
+                        help="Max results to return (default: 10, max: 10000)")
     parser.add_argument("--api-key",  metavar="KEY",
                         help="urlscan.io API key (overrides keychain)")
     parser.add_argument("--save-key", metavar="KEY",
@@ -1085,21 +1258,22 @@ More information: https://thrunter.org/urlscanCLI
 
         if args.json:
             _emit(json.dumps(data, indent=2, default=str) + '\n',
-                  args.logdir, 'STATUS', '', use_json=True)
+                  args.logdir, 'STATUS', '', fmt="json")
         else:
             buf = io.StringIO()
             with redirect_stdout(buf):
                 print_quota_text(data)
-            _emit(buf.getvalue(), args.logdir, 'STATUS', '', use_json=False)
+            _emit(buf.getvalue(), args.logdir, 'STATUS', '', fmt="txt")
         return
 
     # --- Validate mode -------------------------------------------------------
     modes = sum([bool(args.domain), bool(args.ip), bool(args.hostname),
-                 bool(args.scan), bool(args.urlscan), bool(args.hash)])
+                 bool(args.scan), bool(args.urlscan), bool(args.hash),
+                 bool(args.search), bool(args.brands), bool(args.brand)])
     if modes > 1:
-        parser.error("provide only one of: domain, --ip, --hostname, --scan, --urlscan, --hash")
+        parser.error("provide only one of: domain, --ip, --hostname, --scan, --urlscan, --hash, --search, --brands, --brand")
     if modes == 0:
-        parser.error("provide a domain, --ip address/CIDR, --hostname, --scan UUID, --urlscan URL, or --hash SHA256")
+        parser.error("provide a domain, --ip, --hostname, --scan, --urlscan, --hash, --search, --brands, or --brand")
     if (args.public or args.unlisted) and not args.urlscan:
         parser.error("--public and --unlisted can only be used with --urlscan")
     if args.wait and not args.urlscan:
@@ -1147,12 +1321,12 @@ More information: https://thrunter.org/urlscanCLI
             # Just emit the submission receipt and exit
             if args.json:
                 _emit(json.dumps(resp, indent=2, default=str) + '\n',
-                      args.logdir, 'URLSCAN', parsed_host, use_json=True)
+                      args.logdir, 'URLSCAN', parsed_host, fmt="json")
             else:
                 buf = io.StringIO()
                 with redirect_stdout(buf):
                     print_submission_text(resp)
-                _emit(buf.getvalue(), args.logdir, 'URLSCAN', parsed_host, use_json=False)
+                _emit(buf.getvalue(), args.logdir, 'URLSCAN', parsed_host, fmt="txt")
             return
 
         # --wait: print submission info to stderr so stdout stays clean for
@@ -1190,12 +1364,12 @@ More information: https://thrunter.org/urlscanCLI
         # Emit the full scan result (log under SCAN + UUID for consistency with --scan)
         if args.json:
             _emit(json.dumps(scan_data, indent=2, default=str) + '\n',
-                  args.logdir, 'SCAN', submitted_uuid, use_json=True)
+                  args.logdir, 'SCAN', submitted_uuid, fmt="json")
         else:
             buf = io.StringIO()
             with redirect_stdout(buf):
                 print_scan_text(scan_data)
-            _emit(buf.getvalue(), args.logdir, 'SCAN', submitted_uuid, use_json=False)
+            _emit(buf.getvalue(), args.logdir, 'SCAN', submitted_uuid, fmt="txt")
         return
 
     # =========================================================================
@@ -1226,12 +1400,12 @@ More information: https://thrunter.org/urlscanCLI
 
         if args.json:
             _emit(json.dumps(data, indent=2, default=str) + '\n',
-                  args.logdir, 'SCAN', uuid, use_json=True)
+                  args.logdir, 'SCAN', uuid, fmt="json")
         else:
             buf = io.StringIO()
             with redirect_stdout(buf):
                 print_scan_text(data)
-            _emit(buf.getvalue(), args.logdir, 'SCAN', uuid, use_json=False)
+            _emit(buf.getvalue(), args.logdir, 'SCAN', uuid, fmt="txt")
         return
 
     # =========================================================================
@@ -1268,12 +1442,12 @@ More information: https://thrunter.org/urlscanCLI
                 "sources":    summary,
             }
             _emit(json.dumps(out, indent=2, default=str) + '\n',
-                  args.logdir, 'HOST', hostname, use_json=True)
+                  args.logdir, 'HOST', hostname, fmt="json")
         else:
             buf = io.StringIO()
             with redirect_stdout(buf):
                 print_hostname_text(hostname, summary, total)
-            _emit(buf.getvalue(), args.logdir, 'HOST', hostname, use_json=False)
+            _emit(buf.getvalue(), args.logdir, 'HOST', hostname, fmt="txt")
         return
 
     # =========================================================================
@@ -1324,12 +1498,14 @@ More information: https://thrunter.org/urlscanCLI
                 "scans":        _build_scan_list(hits),
             }
             _emit(json.dumps(out, indent=2, default=str) + '\n',
-                  args.logdir, 'IP', ip_raw, use_json=True)
+                  args.logdir, 'IP', ip_raw, fmt="json")
+        elif args.csv:
+            _emit(_format_csv(hits), args.logdir, 'IP', ip_raw, fmt="csv")
         else:
             buf = io.StringIO()
             with redirect_stdout(buf):
                 print_text(label, hits, total, whois={}, certs=certs)
-            _emit(buf.getvalue(), args.logdir, 'IP', ip_raw, use_json=False)
+            _emit(buf.getvalue(), args.logdir, 'IP', ip_raw, fmt="txt")
         return
 
     # =========================================================================
@@ -1366,12 +1542,203 @@ More information: https://thrunter.org/urlscanCLI
                 "scans":      _build_scan_list(hits),
             }
             _emit(json.dumps(out, indent=2, default=str) + '\n',
-                  args.logdir, 'HASH', sha256, use_json=True)
+                  args.logdir, 'HASH', sha256, fmt="json")
+        elif args.csv:
+            _emit(_format_csv(hits), args.logdir, 'HASH', sha256, fmt="csv")
         else:
             buf = io.StringIO()
             with redirect_stdout(buf):
                 print_text(label, hits, total, whois={}, certs=[])
-            _emit(buf.getvalue(), args.logdir, 'HASH', sha256, use_json=False)
+            _emit(buf.getvalue(), args.logdir, 'HASH', sha256, fmt="txt")
+        return
+
+    # =========================================================================
+    # Search mode (freeform query)
+    # =========================================================================
+    if args.search:
+        query_str = args.search.strip()
+        dbg(f"Freeform search query: {query_str!r}")
+
+        try:
+            data = search(query_str, api_key=api_key, size=args.size)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            print(f"Error from urlscan.io: HTTP {e.code} — {body}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        hits  = data.get("results", [])
+        total = data.get("total", 0)
+        # Truncate label for display if query is very long
+        label = query_str if len(query_str) <= 60 else query_str[:57] + "..."
+        dbg(f"Search returned {len(hits)} hits  total={total}")
+
+        if args.json:
+            out = {
+                "query_type": "search",
+                "query":      query_str,
+                "total":      total,
+                "scans":      _build_scan_list(hits),
+            }
+            _emit(json.dumps(out, indent=2, default=str) + '\n',
+                  args.logdir, 'SEARCH', query_str, fmt="json")
+        elif args.csv:
+            _emit(_format_csv(hits), args.logdir, 'SEARCH', query_str, fmt="csv")
+        else:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                print_text(label, hits, total, whois={}, certs=[])
+            _emit(buf.getvalue(), args.logdir, 'SEARCH', query_str, fmt="txt")
+        return
+
+    # =========================================================================
+    # Brands list mode
+    # =========================================================================
+    if args.brands:
+        if not api_key:
+            print("Error: --brands requires an API key (use --api-key or --save-key).",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        try:
+            data = get_available_brands(api_key)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            print(f"Error from urlscan.io: HTTP {e.code} — {body}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        kits = data.get("kits", [])
+        dbg(f"Available brands: {len(kits)}")
+
+        if args.json:
+            out = {
+                "query_type": "brands",
+                "total":      len(kits),
+                "brands":     kits,
+            }
+            _emit(json.dumps(out, indent=2, default=str) + '\n',
+                  args.logdir, 'BRANDS', '', fmt="json")
+        elif args.csv:
+            _emit(_format_brands_csv(kits), args.logdir, 'BRANDS', '', fmt="csv")
+        else:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                print_brands_text(kits)
+            _emit(buf.getvalue(), args.logdir, 'BRANDS', '', fmt="txt")
+        return
+
+    # =========================================================================
+    # Brand detail mode
+    # =========================================================================
+    if args.brand:
+        if not api_key:
+            print("Error: --brand requires an API key (use --api-key or --save-key).",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        brand_key = args.brand.strip().lower()
+        dbg(f"Brand key: {brand_key!r}")
+
+        # Strategy: try the search API first (returns multiple results, respects
+        # --size), fall back to the brands summary endpoint if the search field
+        # is not available on the current plan (HTTP 403).
+        brand_query = f"verdicts.urlscan.brands.key:{brand_key}"
+        search_ok = False
+        hits  = []
+        total = 0
+
+        dbg(f"Attempting brand search via: {brand_query!r}")
+        try:
+            search_data = search(brand_query, api_key=api_key, size=args.size)
+            hits  = search_data.get("results", [])
+            total = search_data.get("total", 0)
+            search_ok = True
+            dbg(f"Brand search OK  hits={len(hits)}  total={total}")
+        except urllib.error.HTTPError as e:
+            if e.code == 403:
+                dbg("Brand search field not available on current plan (403) — falling back to summary API")
+                print("Note: brand search field is not available on your current API plan. "
+                      "Falling back to brand summary (most recent detection only). "
+                      "Upgrade your plan to search 'verdicts.urlscan.brands.key' for full results.",
+                      file=sys.stderr)
+            else:
+                body = e.read().decode(errors="replace")
+                print(f"Error from urlscan.io: HTTP {e.code} — {body}", file=sys.stderr)
+                sys.exit(1)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        # Fetch brand metadata (always needed for display)
+        try:
+            brands_data = get_available_brands(api_key)
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")
+            print(f"Error from urlscan.io: HTTP {e.code} — {body}", file=sys.stderr)
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        brand_info = None
+        for kit in brands_data.get("kits", []):
+            if kit.get("key", "").lower() == brand_key:
+                brand_info = kit
+                break
+
+        if not brand_info:
+            print(f"Error: brand key '{args.brand}' not found. Use --brands to list available brand keys.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        # If the search API was blocked, fall back to brands summary
+        if not search_ok:
+            try:
+                summary_data = get_brands_summary(api_key)
+            except urllib.error.HTTPError as e:
+                body = e.read().decode(errors="replace")
+                print(f"Error from urlscan.io: HTTP {e.code} — {body}", file=sys.stderr)
+                sys.exit(1)
+            except Exception as e:
+                print(f"Error: {e}", file=sys.stderr)
+                sys.exit(1)
+
+            brand_entry = None
+            for entry in summary_data.get("responses", []):
+                brand = entry.get("brand", {})
+                if brand.get("key", "").lower() == brand_key:
+                    brand_entry = entry
+                    break
+
+            if brand_entry:
+                hits  = brand_entry.get("hits", [])
+                total = brand_entry.get("total", 0)
+            dbg(f"Brand summary fallback  total={total}  hits={len(hits)}")
+
+        dbg(f"Brand found: {brand_info.get('name')!r}  total={total}  hits={len(hits)}")
+
+        if args.json:
+            out = {
+                "query_type": "brand",
+                "query":      brand_key,
+                "brand":      brand_info,
+                "total":      total,
+                "scans":      _build_scan_list(hits),
+            }
+            _emit(json.dumps(out, indent=2, default=str) + '\n',
+                  args.logdir, 'BRAND', brand_key, fmt="json")
+        elif args.csv:
+            _emit(_format_csv(hits), args.logdir, 'BRAND', brand_key, fmt="csv")
+        else:
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                print_brand_detail_text(brand_info, hits, total)
+            _emit(buf.getvalue(), args.logdir, 'BRAND', brand_key, fmt="txt")
         return
 
     # =========================================================================
@@ -1415,12 +1782,14 @@ More information: https://thrunter.org/urlscanCLI
             "scans":        _build_scan_list(hits),
         }
         _emit(json.dumps(out, indent=2, default=str) + '\n',
-              args.logdir, 'RESULTS', domain, use_json=True)
+              args.logdir, 'RESULTS', domain, fmt="json")
+    elif args.csv:
+        _emit(_format_csv(hits), args.logdir, 'RESULTS', domain, fmt="csv")
     else:
         buf = io.StringIO()
         with redirect_stdout(buf):
             print_text(domain, hits, total, whois, certs)
-        _emit(buf.getvalue(), args.logdir, 'RESULTS', domain, use_json=False)
+        _emit(buf.getvalue(), args.logdir, 'RESULTS', domain, fmt="txt")
 
 
 if __name__ == "__main__":

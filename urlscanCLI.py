@@ -32,6 +32,7 @@ KEYCHAIN_ACCOUNT = "api-key"
 
 _debug     = False
 _useragent = "Urlscan (+https://thrunter.org/urlscan)"
+_outfile   = None
 
 
 def dbg(msg: str) -> None:
@@ -57,15 +58,26 @@ def _emit(content: str, logdir: Optional[str], operation: str, query: str, fmt: 
     """Write content to stdout and, if logdir is set, also save it to a timestamped log file.
 
     fmt should be "txt", "json", or "csv".
+
+    If a global output filename (-o/--output) is set, the content is *redirected*
+    to that file instead of stdout (used verbatim; placed inside --logdir if that
+    is also given, otherwise written relative to the current directory or as an
+    absolute path). When no output filename is set, the content goes to stdout,
+    and a copy is also saved if --logdir is given, using an auto-generated
+    timestamped name. Notifications, debug, and progress always go to stderr.
     """
-    sys.stdout.write(content)
-    if not logdir:
+    if not _outfile:
+        sys.stdout.write(content)
+    if _outfile:
+        path = os.path.join(logdir, _outfile) if logdir else _outfile
+    elif logdir:
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        ext = fmt
+        query_part = _safe_filename_part(query)
+        filename = f"URLSCAN_{ts}_{operation}_{query_part}.{ext}" if query_part else f"URLSCAN_{ts}_{operation}.{ext}"
+        path = os.path.join(logdir, filename)
+    else:
         return
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    ext = fmt
-    query_part = _safe_filename_part(query)
-    filename = f"URLSCAN_{ts}_{operation}_{query_part}.{ext}" if query_part else f"URLSCAN_{ts}_{operation}.{ext}"
-    path = os.path.join(logdir, filename)
     dbg(f"Writing log: {path}")
     try:
         with open(path, 'w', encoding='utf-8') as fh:
@@ -1113,7 +1125,7 @@ def _format_csv(hits: list) -> str:
 
 
 def main():
-    global _debug, _useragent
+    global _debug, _useragent, _outfile
 
     parser = argparse.ArgumentParser(
         description=f"urlscanCLI {VERSION} — search and interact with urlscan.io from the command line.",
@@ -1202,6 +1214,9 @@ More information: https://thrunter.org/urlscanCLI
                         help="Skip fetching the full result (no WHOIS/cert data, faster)")
     parser.add_argument("--logdir",   metavar="DIR",
                         help="Directory to write a copy of the output to (timestamped file)")
+    parser.add_argument("-o", "--output", dest="output", metavar="FILE",
+                        help="Output file name to write a copy of the output to "
+                             "(used verbatim; placed inside --logdir if that is also given)")
     parser.add_argument("--useragent", metavar="UA",
                         help=f"Override the HTTP User-Agent (default: '{_useragent}')")
     parser.add_argument("--debug", "--DEBUG", dest="debug", action="store_true",
@@ -1213,7 +1228,8 @@ More information: https://thrunter.org/urlscanCLI
     _debug = args.debug
     if args.useragent:
         _useragent = args.useragent
-    dbg(f"urlscanCLI starting  debug=True  useragent={_useragent!r}")
+    _outfile = args.output
+    dbg(f"urlscanCLI starting  debug=True  useragent={_useragent!r}  output={_outfile!r}")
 
     if args.logdir and not os.path.isdir(args.logdir):
         print(f"Error: --logdir {args.logdir!r} is not an existing directory.", file=sys.stderr)

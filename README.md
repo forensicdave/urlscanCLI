@@ -1,6 +1,6 @@
 # urlscanCLI
 
-A command-line tool for querying [urlscan.io](https://urlscan.io) to investigate domains, IP addresses, and hostnames. Supports defanged input formats commonly used in threat intelligence reports. Now supports freeform Urlscan search queries using the very extensive set of operators at https://urlscan.io/docs/search/ and brand related queries.
+A command-line tool for querying [urlscan.io](https://urlscan.io) to investigate domains, IP addresses, and hostnames. Supports defanged input formats commonly used in threat intelligence reports.
 
 More information: <https://thrunter.org/urlscanCLI>
 
@@ -80,6 +80,7 @@ Exactly one of `domain`, `--ip`, `--hostname`, `--scan`, `--urlscan`, `--hash`, 
 | `--status` | Show API quota and rate-limit status for the configured API key and exit |
 | `--no-detail` | Skip fetching the full scan result (faster; omits WHOIS and cert data) |
 | `--logdir DIR` | Save a copy of the output to a timestamped file in this directory |
+| `-o FILE`, `--output FILE` | Redirect the output to this file instead of stdout (name used verbatim; placed inside `--logdir` if that is also given, otherwise written relative to the current directory) |
 | `--debug` / `--DEBUG` | Print debug information to stderr |
 
 ## Defanged input formats
@@ -784,6 +785,30 @@ URLSCAN_20260314_120648_STATUS.txt
 ```
 
 The log notification is written to stderr so it does not contaminate stdout pipelines. If the directory does not exist the tool exits with an error before making any API calls.
+
+### Choosing the output file name
+
+`--logdir` *saves a copy* alongside the output that still goes to stdout. If instead you want to **redirect** the output to a file of your choosing, use `-o` / `--output`:
+
+- `-o FILE` **redirects** the result to that file *instead of* stdout (matching the usual `-o` convention of tools like `curl` and `gcc`).
+- The name is used **verbatim** — no timestamp, operation, query part, or extension is appended.
+- If `--logdir DIR` is also given, the file is written as `DIR/FILE`; otherwise it is written to `FILE` directly (relative to the current directory, or an absolute path).
+- Notifications (`[Logged to …]`), `--debug` output, and `--wait` progress always go to **stderr**, so you still get confirmation even though stdout is quiet.
+
+```
+# Written to ./report.txt; nothing printed to the terminal
+python3 urlscanCLI.py example.com -o report.txt
+
+# Written to ./logs/report.json (--json controls format, -o controls name)
+python3 urlscanCLI.py example.com --json -o report.json --logdir ./logs
+
+# Absolute path, no --logdir needed
+python3 urlscanCLI.py --search 'task.tags:phishing' --csv -o /tmp/phishing.csv
+```
+
+If you want the results both on screen and in a file, either use `--logdir` (which keeps stdout) or pipe through `tee` (`… | tee report.txt`) instead of `-o`.
+
+Note that `-o` sets a single fixed name, so a run that emits more than one file (for example `--urlscan --wait`, which can write both submission and final-report output) will reuse that name and the later write overwrites the earlier one.
 
 ## Notes
 

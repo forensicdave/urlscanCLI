@@ -1,6 +1,6 @@
 # urlscanCLI
 
-A command-line tool for querying [urlscan.io](https://urlscan.io) to investigate domains, IP addresses, and hostnames. Supports defanged input formats commonly used in threat intelligence reports.
+A command-line tool for querying [urlscan.io](https://urlscan.io) to investigate domains, IP addresses, and hostnames. Supports defanged input formats commonly used in threat intelligence reports. Now supports freeform Urlscan search queries use the very extensive set of operators at https://urlscan.io/docs/search/ and brand related queries.
 
 More information: <https://thrunter.org/urlscanCLI>
 
